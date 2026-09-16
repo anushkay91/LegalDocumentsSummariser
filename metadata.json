@@ -1,0 +1,6 @@
+{
+  "name": "LegalLens",
+  "description": "Personal Legal Document Intelligence & Attention Assistant. Understand your documents, track obligations and deadlines, and identify review areas with grounded evidence.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
