@@ -11,6 +11,7 @@ import {
 } from 'lucide-react';
 import { DocumentCategory, LegalDocument } from '../types';
 import { SAMPLE_DOCUMENTS } from '../data/sampleDocuments';
+import { authenticatedFetch } from '../lib/apiClient';
 
 interface DocumentUploadModalProps {
   isOpen: boolean;
@@ -88,7 +89,7 @@ export const DocumentUploadModal: React.FC<DocumentUploadModalProps> = ({
     const docTitle = title.trim() || 'Untitled Legal Document';
 
     try {
-      const response = await fetch('/api/documents/analyze', {
+      const response = await authenticatedFetch('/api/documents/analyze', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({

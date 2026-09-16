@@ -1,5 +1,6 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { LegalDocument, ChatMessage, Citation } from '../types';
+import { authenticatedFetch } from '../lib/apiClient';
 import { 
   Send, 
   Bot, 
@@ -89,7 +90,7 @@ export const DocumentGroundedChat: React.FC<DocumentGroundedChatProps> = ({
     setLoading(true);
 
     try {
-      const response = await fetch('/api/documents/rag-chat', {
+      const response = await authenticatedFetch('/api/documents/rag-chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({

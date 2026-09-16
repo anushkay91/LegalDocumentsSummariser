@@ -11,8 +11,18 @@ import { DocumentDualViewer } from './components/DocumentDualViewer';
 import { DocumentGroundedChat } from './components/DocumentGroundedChat';
 import { DocumentUploadModal } from './components/DocumentUploadModal';
 import { AuditLogModal } from './components/AuditLogModal';
+import { AuthProvider, useAuth } from './context/AuthContext';
+import { AuthModal } from './components/AuthModal';
+import { DeleteDocumentModal } from './components/DeleteDocumentModal';
+import { 
+  saveDocumentToFirestore, 
+  deleteDocumentFromFirestore, 
+  loadUserDocumentsFromFirestore 
+} from './lib/firestoreService';
 
-export const App: React.FC = () => {
+const LegalLensApp: React.FC = () => {
+  const { user, signInGuest } = useAuth();
+
   // Local state for documents
   const [documents, setDocuments] = useState<LegalDocument[]>(() => {
     const saved = localStorage.getItem('legallens_documents');
@@ -42,18 +52,44 @@ export const App: React.FC = () => {
   // Modals state
   const [isUploadOpen, setIsUploadOpen] = useState(false);
   const [isAuditOpen, setIsAuditOpen] = useState(false);
+  const [isAuthOpen, setIsAuthOpen] = useState(false);
+  const [isDeleteOpen, setIsDeleteOpen] = useState(false);
+  const [docToDelete, setDocToDelete] = useState<LegalDocument | null>(null);
 
-  // User Profile
-  const [userProfile] = useState<UserProfile>({
-    id: 'user-default-1',
-    name: 'Alex J. Morgan',
-    email: 'alex.morgan@workspace.local',
+  // Ensure an anonymous session token exists by default for seamless initial use
+  useEffect(() => {
+    if (!user) {
+      signInGuest().catch(() => {
+        // Handled silently for offline or restricted environments
+      });
+    }
+  }, [user, signInGuest]);
+
+  // Sync documents from Firestore if user is authenticated with Google
+  useEffect(() => {
+    if (user && !user.isAnonymous) {
+      loadUserDocumentsFromFirestore(user.uid).then((remoteDocs) => {
+        if (remoteDocs && remoteDocs.length > 0) {
+          setDocuments(remoteDocs);
+          setCurrentDocId(remoteDocs[0].id);
+        }
+      }).catch((err) => {
+        console.warn('Could not sync user documents from Firestore:', err);
+      });
+    }
+  }, [user]);
+
+  // Dynamically bound User Profile
+  const userProfile: UserProfile = {
+    id: user ? user.uid : 'user-default-1',
+    name: user?.displayName || (user?.isAnonymous ? 'Guest User' : user?.email?.split('@')[0] || 'Alex J. Morgan'),
+    email: user?.email || (user?.isAnonymous ? 'guest-session@legallens.app' : 'alex.morgan@workspace.local'),
     preferences: {
       alertOnHarshPenalties: true,
       alertOnRenewalTraps: true,
       remindDaysBeforeDeadlines: 14,
     },
-  });
+  };
 
   // Audit Logs
   const [auditLogs, setAuditLogs] = useState<AuditLogEntry[]>([
@@ -169,6 +205,45 @@ export const App: React.FC = () => {
     setCurrentDocId(newDoc.id);
     setActiveTab('overview');
     logAudit('uploaded', newDoc.id, `Document "${newDoc.title}" successfully ingested and extracted`);
+    
+    // Persist to user Firestore if signed in
+    if (user && !user.isAnonymous) {
+      saveDocumentToFirestore(user.uid, newDoc).catch((err) => {
+        console.warn('Could not persist added document to Firestore:', err);
+      });
+    }
+  };
+
+  const handleRequestDeleteDoc = (doc?: LegalDocument | null) => {
+    const target = doc || currentDoc;
+    if (target) {
+      setDocToDelete(target);
+      setIsDeleteOpen(true);
+    }
+  };
+
+  const handleConfirmDelete = async (documentId: string) => {
+    const deletedDocTitle = docToDelete?.title || 'Document';
+
+    // Delete from Firestore if signed in
+    if (user && !user.isAnonymous) {
+      await deleteDocumentFromFirestore(user.uid, documentId);
+    }
+
+    setDocuments(prev => {
+      const remaining = prev.filter(d => d.id !== documentId);
+      if (currentDocId === documentId) {
+        if (remaining.length > 0) {
+          setCurrentDocId(remaining[0].id);
+        } else {
+          setCurrentDocId('');
+        }
+      }
+      return remaining;
+    });
+
+    logAudit('deleted', documentId, `Document "${deletedDocTitle}" permanently removed from database and workspace`);
+    handleClearHighlight();
   };
 
   const handleWipeSession = () => {
@@ -199,6 +274,8 @@ export const App: React.FC = () => {
         }}
         onOpenUpload={() => setIsUploadOpen(true)}
         onOpenAudit={() => setIsAuditOpen(true)}
+        onOpenAuth={() => setIsAuthOpen(true)}
+        onOpenDeleteDoc={() => handleRequestDeleteDoc(currentDoc)}
         activeTab={activeTab}
         onChangeTab={setActiveTab}
         userProfile={userProfile}
@@ -213,6 +290,7 @@ export const App: React.FC = () => {
                 document={currentDoc}
                 onNavigateTab={setActiveTab}
                 onHighlightClause={handleHighlightClause}
+                onOpenDelete={() => handleRequestDeleteDoc(currentDoc)}
               />
             )}
 
@@ -250,9 +328,17 @@ export const App: React.FC = () => {
             {activeTab === 'viewer' && (
               <DocumentDualViewer
                 document={currentDoc}
+                documents={documents}
+                onSelectDoc={(doc) => {
+                  setCurrentDocId(doc.id);
+                  handleClearHighlight();
+                }}
                 highlightedText={highlightedText}
                 highlightedSection={highlightedSection}
                 onClearHighlight={handleClearHighlight}
+                onHighlightClause={handleHighlightClause}
+                onRequestDelete={() => handleRequestDeleteDoc(currentDoc)}
+                onOpenUpload={() => setIsUploadOpen(true)}
               />
             )}
 
@@ -265,15 +351,25 @@ export const App: React.FC = () => {
             )}
           </>
         ) : (
-          <div className="bg-white rounded-xl border border-slate-200 p-12 text-center max-w-lg mx-auto my-12">
-            <h2 className="text-lg font-bold text-slate-900 mb-2">No Document Selected</h2>
-            <p className="text-xs text-slate-500 mb-4">Please add or select a legal document to begin analysis.</p>
-            <button
-              onClick={() => setIsUploadOpen(true)}
-              className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold rounded-lg shadow-sm"
-            >
-              Add Document
-            </button>
+          <div className="bg-white rounded-xl border border-slate-200 p-12 text-center max-w-lg mx-auto my-12 shadow-sm">
+            <h2 className="text-lg font-bold text-slate-900 mb-2 font-serif">No Document in Workspace</h2>
+            <p className="text-xs text-slate-500 mb-5 leading-relaxed">
+              Your document was removed. You can upload an agreement or restore verified sample contracts.
+            </p>
+            <div className="flex items-center justify-center gap-3">
+              <button
+                onClick={() => setIsUploadOpen(true)}
+                className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold rounded-lg shadow-xs transition-colors"
+              >
+                Add Document
+              </button>
+              <button
+                onClick={handleWipeSession}
+                className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-semibold rounded-lg transition-colors border border-slate-200"
+              >
+                Load Sample Agreement
+              </button>
+            </div>
           </div>
         )}
       </main>
@@ -305,7 +401,30 @@ export const App: React.FC = () => {
         userProfile={userProfile}
         onWipeSession={handleWipeSession}
       />
+
+      <AuthModal
+        isOpen={isAuthOpen}
+        onClose={() => setIsAuthOpen(false)}
+      />
+
+      <DeleteDocumentModal
+        isOpen={isDeleteOpen}
+        document={docToDelete}
+        onClose={() => {
+          setIsDeleteOpen(false);
+          setDocToDelete(null);
+        }}
+        onConfirmDelete={handleConfirmDelete}
+      />
     </div>
+  );
+};
+
+export const App: React.FC = () => {
+  return (
+    <AuthProvider>
+      <LegalLensApp />
+    </AuthProvider>
   );
 };
 

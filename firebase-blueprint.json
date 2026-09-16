@@ -1,0 +1,65 @@
+{
+  "entities": {
+    "userDocument": {
+      "title": "User Legal Document",
+      "description": "An uploaded and analyzed legal agreement stored securely per authenticated user.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Unique identifier of the document"
+        },
+        "userId": {
+          "type": "string",
+          "description": "Owner UID of the document"
+        },
+        "title": {
+          "type": "string",
+          "description": "Title of the legal agreement",
+          "maxLength": 250
+        },
+        "category": {
+          "type": "string",
+          "description": "Category such as rental, employment, vendor, nda, or service",
+          "maxLength": 50
+        },
+        "fileName": {
+          "type": "string",
+          "description": "Original file name",
+          "maxLength": 250
+        },
+        "fileSize": {
+          "type": "number",
+          "description": "File size in bytes"
+        },
+        "uploadDate": {
+          "type": "string",
+          "format": "date-time",
+          "description": "ISO timestamp when uploaded"
+        },
+        "lastAnalyzed": {
+          "type": "string",
+          "format": "date-time",
+          "description": "ISO timestamp when analyzed"
+        },
+        "rawText": {
+          "type": "string",
+          "description": "Full verbatim text representation of the legal document",
+          "maxLength": 500000
+        },
+        "status": {
+          "type": "string",
+          "description": "Processing status (e.g. ready, processing, error)",
+          "maxLength": 30
+        }
+      },
+      "required": ["id", "userId", "title", "category", "uploadDate", "rawText", "status"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}/documents/{documentId}": {
+      "schema": "userDocument",
+      "description": "Private collection of legal documents owned and managed by the authenticated user."
+    }
+  }
+}

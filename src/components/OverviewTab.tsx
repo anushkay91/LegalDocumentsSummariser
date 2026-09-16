@@ -16,19 +16,22 @@ import {
   Scale, 
   BookOpen,
   HelpCircle,
-  ExternalLink
+  ExternalLink,
+  Trash2
 } from 'lucide-react';
 
 interface OverviewTabProps {
   document: LegalDocument;
   onNavigateTab: (tab: 'attention' | 'obligations' | 'deadlines' | 'financial' | 'chat' | 'viewer') => void;
   onHighlightClause: (textSnippet: string, sectionNumber?: string) => void;
+  onOpenDelete?: () => void;
 }
 
 export const OverviewTab: React.FC<OverviewTabProps> = ({
   document,
   onNavigateTab,
   onHighlightClause,
+  onOpenDelete,
 }) => {
   const highAttentionCount = document.attentionItems.filter(a => a.priority === 'high').length;
   const totalAttentionCount = document.attentionItems.length;
@@ -70,11 +73,22 @@ export const OverviewTab: React.FC<OverviewTabProps> = ({
             <button
               id="start-chat-btn"
               onClick={() => onNavigateTab('chat')}
-              className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold shadow-sm transition-all"
+              className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold shadow-xs transition-all"
             >
               <span>Ask Document Assistant</span>
               <ArrowRight className="w-3.5 h-3.5" />
             </button>
+            {onOpenDelete && (
+              <button
+                id="overview-delete-doc-btn"
+                onClick={onOpenDelete}
+                title="Permanently remove this document"
+                className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg border border-slate-200 hover:border-rose-300 bg-white hover:bg-rose-50 text-slate-600 hover:text-rose-700 text-xs font-semibold shadow-xs transition-colors"
+              >
+                <Trash2 className="w-3.5 h-3.5 text-slate-500 hover:text-rose-600" />
+                <span className="hidden sm:inline">Delete</span>
+              </button>
+            )}
           </div>
         </div>
 

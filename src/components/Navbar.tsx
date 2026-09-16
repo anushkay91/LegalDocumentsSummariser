@@ -13,9 +13,12 @@ import {
   Trash2,
   HelpCircle,
   Menu,
-  X
+  X,
+  LogIn,
+  UserCheck
 } from 'lucide-react';
 import { LegalDocument, UserProfile } from '../types';
+import { useAuth } from '../context/AuthContext';
 
 interface NavbarProps {
   documents: LegalDocument[];
@@ -23,6 +26,8 @@ interface NavbarProps {
   onSelectDoc: (doc: LegalDocument) => void;
   onOpenUpload: () => void;
   onOpenAudit: () => void;
+  onOpenAuth: () => void;
+  onOpenDeleteDoc?: () => void;
   activeTab: 'overview' | 'attention' | 'obligations' | 'deadlines' | 'financial' | 'chat' | 'viewer';
   onChangeTab: (tab: 'overview' | 'attention' | 'obligations' | 'deadlines' | 'financial' | 'chat' | 'viewer') => void;
   userProfile: UserProfile;
@@ -34,10 +39,13 @@ export const Navbar: React.FC<NavbarProps> = ({
   onSelectDoc,
   onOpenUpload,
   onOpenAudit,
+  onOpenAuth,
+  onOpenDeleteDoc,
   activeTab,
   onChangeTab,
   userProfile,
 }) => {
+  const { user } = useAuth();
   const [mobileMenuOpen, setMobileMenuOpen] = React.useState(false);
 
   // Count high priority attention items
@@ -103,9 +111,9 @@ export const Navbar: React.FC<NavbarProps> = ({
             </div>
           </div>
 
-          {/* Active Document Selector */}
-          <div className="flex-1 max-w-xs md:max-w-sm">
-            <div className="relative">
+          {/* Active Document Selector & Quick Delete */}
+          <div className="flex-1 max-w-xs md:max-w-sm flex items-center gap-1.5">
+            <div className="relative flex-1">
               <select
                 id="document-selector"
                 value={currentDoc?.id || ''}
@@ -123,6 +131,18 @@ export const Navbar: React.FC<NavbarProps> = ({
                 ))}
               </select>
             </div>
+
+            {currentDoc && onOpenDeleteDoc && (
+              <button
+                id="navbar-delete-doc-btn"
+                onClick={onOpenDeleteDoc}
+                title={`Delete "${currentDoc.title}" from database`}
+                aria-label={`Delete "${currentDoc.title}"`}
+                className="p-2 rounded-lg bg-slate-800 hover:bg-rose-950/60 text-slate-400 hover:text-rose-400 border border-slate-700 hover:border-rose-700/50 transition-colors shrink-0"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+              </button>
+            )}
           </div>
 
           {/* Action Buttons */}
@@ -145,6 +165,32 @@ export const Navbar: React.FC<NavbarProps> = ({
             >
               <ShieldCheck className="w-4 h-4 text-emerald-400" />
               <span className="hidden lg:inline text-[11px]">Privacy & Audit</span>
+            </button>
+
+            {/* User Session Auth Button */}
+            <button
+              id="user-auth-btn"
+              onClick={onOpenAuth}
+              title={user ? `Signed in as ${user.email || 'Guest'}` : 'Sign in to LegalLens'}
+              className={`p-2 rounded-lg text-xs flex items-center gap-1.5 transition-colors border ${
+                user 
+                  ? 'bg-emerald-950/60 hover:bg-emerald-900/80 text-emerald-300 border-emerald-600/40' 
+                  : 'bg-slate-800 hover:bg-slate-700 text-slate-200 border-slate-700'
+              }`}
+            >
+              {user ? (
+                <>
+                  <UserCheck className="w-4 h-4 text-emerald-400 shrink-0" />
+                  <span className="hidden lg:inline text-[11px] truncate max-w-[120px]">
+                    {user.isAnonymous ? 'Guest User' : user.email?.split('@')[0]}
+                  </span>
+                </>
+              ) : (
+                <>
+                  <LogIn className="w-4 h-4 text-slate-300 shrink-0" />
+                  <span className="hidden lg:inline text-[11px]">Sign In</span>
+                </>
+              )}
             </button>
 
             {/* Mobile menu toggle */}
