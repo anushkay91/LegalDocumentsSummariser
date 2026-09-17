@@ -94,11 +94,9 @@ export const DocumentGroundedChat: React.FC<DocumentGroundedChatProps> = ({
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
+          documentId: document.id,
           query: textToSend.trim(),
-          documentTitle: document.title,
-          documentCategory: document.category,
-          documentText: document.rawText,
-          history: messages.slice(-4),
+          sessionId: `session-${document.id}`,
         }),
       });
 

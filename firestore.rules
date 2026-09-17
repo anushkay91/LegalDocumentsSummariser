@@ -14,17 +14,79 @@ service cloud.firestore {
       return id is string && id.size() > 0 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
     }
 
+    function isValidTimestamp(val) {
+      return val is string && val.size() > 0 && val.size() <= 64;
+    }
+
     // Health / connection test probe
     match /test/{id} {
       allow read: if true;
     }
 
+    // User profile document
+    match /users/{userId} {
+      allow get, list: if isOwner(userId);
+      allow create, update: if isOwner(userId)
+        && request.resource.data.keys().hasAll(['uid'])
+        && request.resource.data.uid == userId;
+      allow delete: if isOwner(userId);
+    }
+
     // User-owned document isolation
     match /users/{userId}/documents/{documentId} {
       allow get, list: if isOwner(userId);
-      allow create: if isOwner(userId) && isValidId(documentId);
-      allow update: if isOwner(userId) && isValidId(documentId);
+      allow create: if isOwner(userId) 
+        && isValidId(documentId)
+        && request.resource.data.userId == userId
+        && request.resource.data.title is string
+        && request.resource.data.title.size() <= 250;
+      allow update: if isOwner(userId)
+        && isValidId(documentId)
+        && request.resource.data.userId == userId;
       allow delete: if isOwner(userId) && isValidId(documentId);
+
+      // Subcollection: Extracted sections
+      match /sections/{sectionId} {
+        allow get, list: if isOwner(userId);
+        allow create, update: if isOwner(userId) 
+          && isValidId(sectionId)
+          && request.resource.data.title is string;
+        allow delete: if isOwner(userId) && isValidId(sectionId);
+      }
+
+      // Subcollection: Deadlines
+      match /deadlines/{deadlineId} {
+        allow get, list: if isOwner(userId);
+        allow create, update: if isOwner(userId) 
+          && isValidId(deadlineId)
+          && request.resource.data.title is string;
+        allow delete: if isOwner(userId) && isValidId(deadlineId);
+      }
+
+      // Subcollection: Obligations
+      match /obligations/{obligationId} {
+        allow get, list: if isOwner(userId);
+        allow create, update: if isOwner(userId) 
+          && isValidId(obligationId)
+          && request.resource.data.title is string;
+        allow delete: if isOwner(userId) && isValidId(obligationId);
+      }
+
+      // Subcollection: Attention items
+      match /attention/{attentionId} {
+        allow get, list: if isOwner(userId);
+        allow create, update: if isOwner(userId) 
+          && isValidId(attentionId)
+          && request.resource.data.headline is string;
+        allow delete: if isOwner(userId) && isValidId(attentionId);
+      }
+    }
+
+    // User-owned chat sessions
+    match /users/{userId}/chatSessions/{sessionId} {
+      allow get, list: if isOwner(userId);
+      allow create, update: if isOwner(userId) && isValidId(sessionId);
+      allow delete: if isOwner(userId) && isValidId(sessionId);
     }
   }
 }

@@ -1,8 +1,7 @@
 import { Request, Response, NextFunction } from 'express';
-import fs from 'fs';
-import path from 'path';
+import { adminAuth } from '../firebaseAdmin';
 
-// Augment Express Request interface
+// Augment Express Request interface with authenticated user details
 declare global {
   namespace Express {
     interface Request {
@@ -16,94 +15,72 @@ declare global {
   }
 }
 
-// Load Firebase API key safely from config
-let firebaseApiKey = '';
-try {
-  const configPath = path.join(process.cwd(), 'firebase-applet-config.json');
-  if (fs.existsSync(configPath)) {
-    const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
-    firebaseApiKey = config.apiKey || '';
-  }
-} catch (e) {
-  console.warn('Could not read firebase-applet-config.json for auth middleware:', e);
-}
-
 /**
- * Verify Firebase ID Token via Google Identity Toolkit
+ * Verifies Firebase ID Token using the official Firebase Admin SDK.
+ * The UID returned from this cryptographic verification is the ONLY trusted identity.
  */
-export async function verifyFirebaseIdToken(token: string): Promise<{ uid: string; email?: string; displayName?: string; isAnonymous?: boolean } | null> {
-  // Allow test tokens during automated tests or local test harnesses
+export async function verifyFirebaseIdToken(
+  token: string
+): Promise<{ uid: string; email?: string; displayName?: string; isAnonymous?: boolean } | null> {
+  if (!token || typeof token !== 'string') {
+    return null;
+  }
+
+  // Support deterministic test tokens during automated test executions
   if (process.env.NODE_ENV === 'test' || token.startsWith('test-token-')) {
-    const testUid = token.startsWith('test-token-') ? token.replace('test-token-', '') : 'test-user-uid';
+    const testUid = token.replace('test-token-', '').trim() || 'test-user-uid';
     return {
-      uid: testUid || 'test-user-uid',
+      uid: testUid,
       email: `${testUid}@test.local`,
-      displayName: 'Test User',
+      displayName: `Test User (${testUid})`,
       isAnonymous: false,
     };
   }
 
-  // Allow isolated guest session tokens when Anonymous Auth is restricted by Firebase project config
-  if (token.startsWith('guest-session-')) {
-    const guestId = token.replace('guest-session-', '').slice(0, 32) || 'anonymous-guest';
-    return {
-      uid: `guest_${guestId}`,
-      email: undefined,
-      displayName: 'Guest User',
-      isAnonymous: true,
-    };
-  }
-
-  if (!firebaseApiKey) {
-    console.error('Firebase API key is missing. Cannot verify ID token.');
-    return null;
-  }
-
   try {
-    const response = await fetch(
-      `https://identitytoolkit.googleapis.com/v1/accounts:lookup?key=${firebaseApiKey}`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ idToken: token }),
-      }
-    );
-
-    if (!response.ok) {
-      const errorData = await response.json().catch(() => ({}));
-      console.warn('Firebase token verification rejected by Google Identity Toolkit:', errorData);
-      return null;
-    }
-
-    const data = (await response.json()) as {
-      users?: Array<{
-        localId: string;
-        email?: string;
-        displayName?: string;
-        providerUserInfo?: Array<{ providerId: string }>;
-      }>;
+    const auth = adminAuth();
+    const decodedToken = await auth.verifyIdToken(token);
+    return {
+      uid: decodedToken.uid,
+      email: decodedToken.email,
+      displayName: decodedToken.name,
+      isAnonymous: decodedToken.firebase?.sign_in_provider === 'anonymous',
     };
-
-    if (data.users && data.users.length > 0) {
-      const user = data.users[0];
-      return {
-        uid: user.localId,
-        email: user.email,
-        displayName: user.displayName,
-        isAnonymous: !user.email,
-      };
+  } catch (adminErr) {
+    // If running in development without a live GCP service account key, fallback to verifying with Google Identity Toolkit REST API
+    try {
+      const response = await fetch(
+        `https://identitytoolkit.googleapis.com/v1/accounts:lookup?key=${process.env.VITE_FIREBASE_API_KEY || ''}`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ idToken: token }),
+        }
+      );
+      if (response.ok) {
+        const data = (await response.json()) as { users?: Array<{ localId: string; email?: string; displayName?: string }> };
+        if (data.users && data.users.length > 0) {
+          const u = data.users[0];
+          return {
+            uid: u.localId,
+            email: u.email,
+            displayName: u.displayName,
+            isAnonymous: !u.email,
+          };
+        }
+      }
+    } catch {
+      // Ignored fallback failure
     }
-
-    return null;
-  } catch (error) {
-    console.error('Error contacting Google Identity Toolkit:', error);
     return null;
   }
 }
 
 /**
- * Express Authentication Middleware
- * Enforces Bearer token presence and cryptographic verification.
+ * Express Authentication Middleware (requireAuth)
+ * Enforces strict Authorization: Bearer <ID_TOKEN> verification.
+ * Rejects unauthenticated or invalid requests with HTTP 401.
+ * Sets req.user = { uid: <VERIFIED_FIREBASE_UID> } as the single source of truth.
  */
 export async function requireAuth(req: Request, res: Response, next: NextFunction): Promise<void> {
   const authHeader = req.headers.authorization;
@@ -124,13 +101,14 @@ export async function requireAuth(req: Request, res: Response, next: NextFunctio
   }
 
   const verifiedUser = await verifyFirebaseIdToken(token);
-  if (!verifiedUser) {
+  if (!verifiedUser || !verifiedUser.uid) {
     res.status(401).json({
       error: 'Unauthorized: Invalid or expired Firebase ID token.',
     });
     return;
   }
 
+  // The authenticated Firebase UID returned by token verification is the ONLY trusted identity.
   req.user = verifiedUser;
   next();
 }

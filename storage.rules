@@ -1,0 +1,42 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() > 0 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function isValidMimeType() {
+      return request.resource.contentType in [
+        'application/pdf',
+        'text/plain',
+        'application/msword',
+        'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        'text/markdown'
+      ];
+    }
+
+    function isValidSize() {
+      // 15MB maximum file size
+      return request.resource.size > 0 && request.resource.size <= 15 * 1024 * 1024;
+    }
+
+    // Private user document storage: users/{uid}/documents/{documentId}/original
+    match /users/{userId}/documents/{documentId}/original {
+      allow read: if isOwner(userId);
+      allow write: if isOwner(userId)
+        && isValidId(documentId)
+        && isValidMimeType()
+        && isValidSize();
+      allow delete: if isOwner(userId);
+    }
+  }
+}

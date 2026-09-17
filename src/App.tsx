@@ -17,28 +17,19 @@ import { DeleteDocumentModal } from './components/DeleteDocumentModal';
 import { 
   saveDocumentToFirestore, 
   deleteDocumentFromFirestore, 
-  loadUserDocumentsFromFirestore 
+  loadUserDocumentsFromFirestore,
+  subscribeToUserDocuments 
 } from './lib/firestoreService';
+import { authenticatedFetch } from './lib/apiClient';
 
 const LegalLensApp: React.FC = () => {
   const { user, signInGuest } = useAuth();
 
-  // Local state for documents
-  const [documents, setDocuments] = useState<LegalDocument[]>(() => {
-    const saved = localStorage.getItem('legallens_documents');
-    if (saved) {
-      try {
-        const parsed = JSON.parse(saved);
-        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
-      } catch (e) {
-        console.error('Failed to parse saved documents', e);
-      }
-    }
-    return SAMPLE_DOCUMENTS;
-  });
+  // In-memory state for documents (Phase 5: zero localStorage storage of legal documents or sensitive analysis)
+  const [documents, setDocuments] = useState<LegalDocument[]>(SAMPLE_DOCUMENTS);
 
   const [currentDocId, setCurrentDocId] = useState<string>(() => {
-    return documents[0]?.id || SAMPLE_DOCUMENTS[0].id;
+    return SAMPLE_DOCUMENTS[0].id;
   });
 
   const [activeTab, setActiveTab] = useState<
@@ -56,26 +47,23 @@ const LegalLensApp: React.FC = () => {
   const [isDeleteOpen, setIsDeleteOpen] = useState(false);
   const [docToDelete, setDocToDelete] = useState<LegalDocument | null>(null);
 
-  // Ensure an anonymous session token exists by default for seamless initial use
+  // Ensure an anonymous session exists by default for seamless initial use
   useEffect(() => {
     if (!user) {
-      signInGuest().catch(() => {
-        // Handled silently for offline or restricted environments
-      });
+      signInGuest().catch(() => {});
     }
   }, [user, signInGuest]);
 
-  // Sync documents from Firestore if user is authenticated with Google
+  // Phase 5: Real-time Firestore document sync when user is authenticated
   useEffect(() => {
     if (user && !user.isAnonymous) {
-      loadUserDocumentsFromFirestore(user.uid).then((remoteDocs) => {
+      const unsubscribe = subscribeToUserDocuments(user.uid, (remoteDocs) => {
         if (remoteDocs && remoteDocs.length > 0) {
           setDocuments(remoteDocs);
-          setCurrentDocId(remoteDocs[0].id);
+          setCurrentDocId(prev => remoteDocs.some(d => d.id === prev) ? prev : remoteDocs[0].id);
         }
-      }).catch((err) => {
-        console.warn('Could not sync user documents from Firestore:', err);
       });
+      return () => unsubscribe();
     }
   }, [user]);
 
@@ -108,11 +96,6 @@ const LegalLensApp: React.FC = () => {
       details: 'Automatic Renewal Lock-In flagged as High Attention priority',
     },
   ]);
-
-  // Persist to local storage
-  useEffect(() => {
-    localStorage.setItem('legallens_documents', JSON.stringify(documents));
-  }, [documents]);
 
   const currentDoc = documents.find(d => d.id === currentDocId) || documents[0] || null;
 
@@ -225,7 +208,16 @@ const LegalLensApp: React.FC = () => {
   const handleConfirmDelete = async (documentId: string) => {
     const deletedDocTitle = docToDelete?.title || 'Document';
 
-    // Delete from Firestore if signed in
+    // Phase 9: Trigger cascading deletion across Storage, Subcollections, and Semantic RAG index
+    try {
+      await authenticatedFetch(`/api/documents/${documentId}`, {
+        method: 'DELETE',
+      });
+    } catch (err) {
+      console.warn('Backend cascading deletion note:', err);
+    }
+
+    // Delete from Firestore directly if signed in
     if (user && !user.isAnonymous) {
       await deleteDocumentFromFirestore(user.uid, documentId);
     }
@@ -242,12 +234,11 @@ const LegalLensApp: React.FC = () => {
       return remaining;
     });
 
-    logAudit('deleted', documentId, `Document "${deletedDocTitle}" permanently removed from database and workspace`);
+    logAudit('deleted', documentId, `Document "${deletedDocTitle}" permanently purged across storage, database, and index`);
     handleClearHighlight();
   };
 
   const handleWipeSession = () => {
-    localStorage.removeItem('legallens_documents');
     setDocuments(SAMPLE_DOCUMENTS);
     setCurrentDocId(SAMPLE_DOCUMENTS[0].id);
     setActiveTab('overview');
@@ -257,7 +248,7 @@ const LegalLensApp: React.FC = () => {
         timestamp: new Date().toISOString(),
         action: 'deleted',
         documentId: 'system',
-        details: 'Local workspace reset. Reinitialized with verified sample agreements.',
+        details: 'Active workspace reset. Reinitialized with verified sample agreements.',
       },
     ]);
   };

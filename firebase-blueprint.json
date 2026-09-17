@@ -1,5 +1,17 @@
 {
   "entities": {
+    "userProfile": {
+      "title": "User Profile",
+      "description": "Authenticated user profile data",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "email": { "type": "string" },
+        "displayName": { "type": "string" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid"]
+    },
     "userDocument": {
       "title": "User Legal Document",
       "description": "An uploaded and analyzed legal agreement stored securely per authenticated user.",
@@ -32,6 +44,10 @@
           "type": "number",
           "description": "File size in bytes"
         },
+        "storagePath": {
+          "type": "string",
+          "description": "Private Firebase Storage path"
+        },
         "uploadDate": {
           "type": "string",
           "format": "date-time",
@@ -42,24 +58,107 @@
           "format": "date-time",
           "description": "ISO timestamp when analyzed"
         },
-        "rawText": {
-          "type": "string",
-          "description": "Full verbatim text representation of the legal document",
-          "maxLength": 500000
-        },
         "status": {
           "type": "string",
-          "description": "Processing status (e.g. ready, processing, error)",
+          "description": "Processing status (ready, processing, processing_failed)",
           "maxLength": 30
         }
       },
-      "required": ["id", "userId", "title", "category", "uploadDate", "rawText", "status"]
+      "required": ["id", "userId", "title", "category", "uploadDate", "status"]
+    },
+    "extractedSection": {
+      "title": "Extracted Section",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "sectionNumber": { "type": "string" },
+        "title": { "type": "string" },
+        "page": { "type": "number" },
+        "verbatimQuote": { "type": "string" },
+        "plainEnglish": { "type": "string" },
+        "category": { "type": "string" }
+      },
+      "required": ["id", "title"]
+    },
+    "deadline": {
+      "title": "Document Deadline",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "title": { "type": "string" },
+        "dueDate": { "type": "string" },
+        "actionRequired": { "type": "string" },
+        "consequenceIfMissed": { "type": "string" },
+        "urgency": { "type": "string" },
+        "daysRemaining": { "type": "number" },
+        "completed": { "type": "boolean" }
+      },
+      "required": ["id", "title"]
+    },
+    "obligation": {
+      "title": "Document Obligation",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "party": { "type": "string" },
+        "title": { "type": "string" },
+        "description": { "type": "string" },
+        "severity": { "type": "string" }
+      },
+      "required": ["id", "title"]
+    },
+    "attentionItem": {
+      "title": "Attention Item",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "headline": { "type": "string" },
+        "whyAttention": { "type": "string" },
+        "priority": { "type": "string" },
+        "status": { "type": "string" }
+      },
+      "required": ["id", "headline"]
+    },
+    "chatSession": {
+      "title": "Chat Session",
+      "type": "object",
+      "properties": {
+        "sessionId": { "type": "string" },
+        "documentId": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["sessionId", "documentId"]
     }
   },
   "firestore": {
+    "/users/{userId}": {
+      "schema": "userProfile",
+      "description": "User profile document"
+    },
     "/users/{userId}/documents/{documentId}": {
       "schema": "userDocument",
       "description": "Private collection of legal documents owned and managed by the authenticated user."
+    },
+    "/users/{userId}/documents/{documentId}/sections/{sectionId}": {
+      "schema": "extractedSection",
+      "description": "Extracted legal provisions belonging to the document"
+    },
+    "/users/{userId}/documents/{documentId}/deadlines/{deadlineId}": {
+      "schema": "deadline",
+      "description": "Critical deadlines extracted from the document"
+    },
+    "/users/{userId}/documents/{documentId}/obligations/{obligationId}": {
+      "schema": "obligation",
+      "description": "Extracted contractual obligations"
+    },
+    "/users/{userId}/documents/{documentId}/attention/{attentionId}": {
+      "schema": "attentionItem",
+      "description": "Attention areas identified in the document"
+    },
+    "/users/{userId}/chatSessions/{sessionId}": {
+      "schema": "chatSession",
+      "description": "Grounded chat session references for the user"
     }
   }
 }

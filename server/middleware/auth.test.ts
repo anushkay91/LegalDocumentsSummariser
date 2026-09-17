@@ -118,12 +118,9 @@ describe('Authentication Middleware (Phase 1: Real Authentication)', () => {
     expect(verified?.uid).toBe('usr-999');
   });
 
-  it('should verify guest session token and populate anonymous user profile', async () => {
+  it('should reject unverified guest session token without real Firebase token', async () => {
     const guestToken = 'guest-session-abc123xyz';
     const verified = await verifyFirebaseIdToken(guestToken);
-    expect(verified).not.toBeNull();
-    expect(verified?.uid).toBe('guest_abc123xyz');
-    expect(verified?.isAnonymous).toBe(true);
-    expect(verified?.displayName).toBe('Guest User');
+    expect(verified).toBeNull();
   });
 });

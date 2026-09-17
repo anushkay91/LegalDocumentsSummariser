@@ -9,27 +9,17 @@ import {
   User 
 } from 'firebase/auth';
 import { getFirestore, doc, getDocFromServer } from 'firebase/firestore';
+import { getStorage, ref as storageRef, uploadBytes, getDownloadURL } from 'firebase/storage';
 import firebaseConfig from '../../firebase-applet-config.json';
 
 const app = getApps().length === 0 ? initializeApp(firebaseConfig) : getApp();
 export const auth = getAuth(app);
 export const db = getFirestore(app, firebaseConfig.firestoreDatabaseId || undefined);
+export const storage = getStorage(app, firebaseConfig.storageBucket || undefined);
 
 // Google Auth Provider
 export const googleProvider = new GoogleAuthProvider();
 googleProvider.setCustomParameters({ prompt: 'select_account' });
-
-export function getOrCreateGuestSessionToken(): string {
-  try {
-    const existing = localStorage.getItem('legallens_guest_token');
-    if (existing) return existing;
-    const newToken = `guest-session-${Math.random().toString(36).substring(2, 10)}${Date.now().toString(36)}`;
-    localStorage.setItem('legallens_guest_token', newToken);
-    return newToken;
-  } catch {
-    return `guest-session-fallback-${Date.now()}`;
-  }
-}
 
 export async function loginWithGoogle() {
   try {
@@ -44,33 +34,43 @@ export async function loginAnonymously() {
   try {
     return await signInAnonymously(auth);
   } catch (error: any) {
-    if (error?.code === 'auth/admin-restricted-operation' || error?.message?.includes('admin-restricted-operation')) {
-      // Firebase Anonymous Authentication provider is disabled in this project's Firebase Console.
-      // We seamlessly switch to the client-isolated guest session.
-      return null;
-    }
     console.warn('Anonymous sign-in encounter:', error);
     return null;
   }
 }
 
 export async function logoutUser() {
-  try {
-    localStorage.removeItem('legallens_guest_token');
-  } catch {}
   return await firebaseSignOut(auth);
 }
 
+/**
+ * Returns real cryptographically signed Firebase ID token.
+ */
 export async function getCurrentIdToken(forceRefresh = false): Promise<string | null> {
   const currentUser = auth.currentUser;
   if (currentUser) {
     try {
       return await currentUser.getIdToken(forceRefresh);
-    } catch {
-      // Fall through to guest session
+    } catch (e) {
+      console.warn('Failed to retrieve Firebase ID token:', e);
     }
   }
-  return getOrCreateGuestSessionToken();
+  return null;
+}
+
+/**
+ * Uploads a document file to the user's private storage path:
+ * users/{uid}/documents/{documentId}/original
+ */
+export async function uploadPrivateDocumentFile(
+  userId: string,
+  documentId: string,
+  fileBlob: Blob | File
+): Promise<string> {
+  const path = `users/${userId}/documents/${documentId}/original`;
+  const fileRef = storageRef(storage, path);
+  await uploadBytes(fileRef, fileBlob);
+  return path;
 }
 
 // Connection check as mandated by Firebase integration guidelines

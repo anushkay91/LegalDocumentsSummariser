@@ -1,9 +1,21 @@
 import express, { Request, Response } from 'express';
 import path from 'path';
 import dotenv from 'dotenv';
-import { GoogleGenAI, Type } from '@google/genai';
+import { GoogleGenAI } from '@google/genai';
 import { createServer as createViteServer } from 'vite';
 import { requireAuth } from './server/middleware/auth';
+import { documentProcessLimiter, chatLimiter } from './server/middleware/rateLimiter';
+import { validateProcessDocumentRequest, validateChatRequest } from './server/middleware/validation';
+import { validateAiAnalysisOutput } from './server/services/aiValidation';
+import { indexDocument, retrieveSemanticChunks } from './server/rag/semanticStore';
+import { 
+  savePrivateFile, 
+  getPrivateFile, 
+  verifyDocumentOwnership, 
+  saveDocumentAndSubcollections, 
+  deleteDocumentCascade, 
+  getDocumentById 
+} from './server/services/documentService';
 import { 
   generateContentWithResilience, 
   generateGroundedExcerptFallback 
@@ -12,9 +24,11 @@ import {
 dotenv.config();
 
 const app = express();
-const PORT = 3000;
+// Phase 11: Cloud Run dynamic port binding with 3000 fallback, listening on 0.0.0.0
+const PORT = Number(process.env.PORT || 3000);
 
-app.use(express.json({ limit: '25mb' }));
+// Phase 12: Safe body size limit (reduced from 25mb to 1mb)
+app.use(express.json({ limit: '1mb' }));
 
 // Initialize Gemini Client
 const apiKey = process.env.GEMINI_API_KEY;
@@ -50,41 +64,11 @@ CRITICAL OPERATIONAL & ETHICAL BOUNDARIES:
 5. Identify areas where standard protective practices, asymmetries, or cross-clause contradictions might warrant a conversation with a qualified attorney.
 `;
 
-// Helper for RAG chunking and semantic relevance scoring
-function retrieveRelevantChunks(query: string, text: string, maxChunks = 5): string[] {
-  // Split document into paragraphs or sections
-  const rawParagraphs = text.split(/\n\s*\n+/).map(p => p.trim()).filter(p => p.length > 40);
-  if (rawParagraphs.length <= maxChunks) {
-    return rawParagraphs;
-  }
-
-  const queryTerms = query.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter(t => t.length > 2);
-  
-  const scored = rawParagraphs.map(para => {
-    const lowerPara = para.toLowerCase();
-    let score = 0;
-    for (const term of queryTerms) {
-      if (lowerPara.includes(term)) {
-        score += 3;
-      }
-    }
-    // Boost paragraphs with section headings or legal markers
-    if (/(section|article|clause|\d+\.\d+|shall|must|terminate|renew|pay|deposit|damage)/i.test(para)) {
-      score += 1;
-    }
-    return { para, score };
-  });
-
-  scored.sort((a, b) => b.score - a.score);
-  return scored.slice(0, maxChunks).map(s => s.para);
-}
-
-// API Health Check
+// Phase 11: Public Health Check (Must NOT disclose API key existence)
 app.get('/api/health', (_req: Request, res: Response) => {
   res.json({
     status: 'ok',
     service: 'LegalLens Document Intelligence API',
-    hasApiKey: Boolean(process.env.GEMINI_API_KEY),
     timestamp: new Date().toISOString(),
   });
 });
@@ -97,83 +81,48 @@ app.get('/api/auth/me', requireAuth, (req: Request, res: Response) => {
   });
 });
 
-// Structured fallback analysis generator when Gemini models are unavailable or unconfigured
-function extractFallbackAnalysis(rawText: string, title?: string, category?: string) {
-  return {
-    metadata: {
-      parties: [{ name: 'First Party', role: 'Disclosing/Primary Party' }, { name: 'Second Party', role: 'Counterparty' }],
-      effectiveDate: new Date().toISOString().split('T')[0],
-      governingLaw: 'Jurisdiction specified in document',
-      termLength: 'As specified in document terms',
-      summary: `Document "${title || 'Legal Agreement'}" (${category || 'General'}) ingested. Content processed through local document extraction engine.`,
-    },
-    extractedSections: [
-      {
-        id: `sec-${Date.now()}-1`,
-        sectionNumber: '1.0',
-        title: title ? `${title} - Ingested Provisions` : 'Document Provisions',
-        page: 1,
-        verbatimQuote: rawText.slice(0, 300) + '...',
-        plainEnglish: 'This section contains the initial provision text extracted from your document for comprehension.',
-        category: 'general',
+/**
+ * Phase 6: DIRECT-TO-STORAGE DOCUMENT PROCESSING ENDPOINT
+ * Receives: { documentId, title, category, fileName, fileSize, mimeType, fileContent }
+ * The backend verifies Firebase ID token, verifies document ownership, retrieves the private file,
+ * processes it with Gemini, indexes semantic chunks, and stores structured results in Firestore subcollections.
+ */
+app.post(
+  '/api/documents/process',
+  requireAuth,
+  documentProcessLimiter,
+  validateProcessDocumentRequest,
+  async (req: Request, res: Response) => {
+    try {
+      const uid = req.user!.uid;
+      const { documentId, title, category, fileName, fileSize, mimeType, fileContent } = req.body;
+
+      // If client provides file content directly during upload, store it into private storage first
+      if (fileContent && typeof fileContent === 'string') {
+        await savePrivateFile(uid, documentId, fileContent, mimeType || 'text/plain');
       }
-    ],
-    obligations: [
-      {
-        id: `ob-${Date.now()}-1`,
-        party: 'user',
-        partyName: 'You',
-        title: 'Review Full Text and Verify Terms',
-        description: 'Read the complete document terms and verify commitments with a qualified legal professional.',
-        severity: 'standard',
-        frequency: 'one-time',
-        sourceSection: 'General Terms',
-        sourceQuote: rawText.slice(0, 150),
+
+      // Retrieve from private storage
+      const documentRawText = await getPrivateFile(uid, documentId);
+      if (!documentRawText || documentRawText.trim().length < 20) {
+        return res.status(400).json({ error: 'Document text is missing or unreadable from private storage.' });
       }
-    ],
-    deadlines: [],
-    financialCommitments: [],
-    attentionItems: [
-      {
-        id: `att-${Date.now()}-1`,
-        category: 'unusual_term',
-        priority: 'medium',
-        headline: 'Document Ingestion Complete',
-        whyAttention: 'This document has been ingested into your workspace. Provisions are available across Attention, Obligations, and Viewer tabs.',
-        verbatimQuote: rawText.slice(0, 200),
-        sourceSection: 'Document Preamble',
-        pageNumber: 1,
-        suggestedQuestions: ['What are the termination conditions?', 'Are there automatic renewal or notice clauses?'],
-        status: 'unreviewed',
-      }
-    ],
-    inconsistencies: [],
-  };
-}
 
-// Analyze Document Endpoint (Protected with Firebase Auth)
-app.post('/api/documents/analyze', requireAuth, async (req: Request, res: Response) => {
-  try {
-    const { title, category, rawText } = req.body;
+      const docTitle = (title && typeof title === 'string') ? title.trim() : 'Legal Document';
+      const docCategory = (category && typeof category === 'string') ? category.trim() : 'General Agreement';
 
-    if (!rawText || typeof rawText !== 'string' || rawText.trim().length < 20) {
-      return res.status(400).json({ error: 'Please provide valid document text to analyze.' });
-    }
+      const ai = getAiClient();
+      let analysisData: any = null;
 
-    const ai = getAiClient();
-    if (!ai) {
-      // Return structured extraction fallback when API key is not yet configured
-      return res.json(extractFallbackAnalysis(rawText, title, category));
-    }
-
-    const extractionPrompt = `
+      if (ai) {
+        const extractionPrompt = `
 Analyze the following legal document with extreme precision.
-Document Title: ${title || 'Legal Document'}
-Document Category: ${category || 'General Agreement'}
+Document Title: ${docTitle}
+Document Category: ${docCategory}
 
 FULL DOCUMENT TEXT:
 """
-${rawText.slice(0, 25000)}
+${documentRawText.slice(0, 30000)}
 """
 
 Extract structured legal document intelligence in JSON matching this schema:
@@ -202,12 +151,12 @@ Extract structured legal document intelligence in JSON matching this schema:
     {
       "id": "ob-1",
       "party": "user|counterparty|mutual",
-      "partyName": "e.g. Alex Morgan (Tenant)",
+      "partyName": "Party Name",
       "title": "Short title of obligation",
       "description": "What must be done, when, and under what condition",
       "severity": "critical|moderate|standard",
       "frequency": "one-time|recurring|conditional",
-      "sourceSection": "e.g. Section 2.1",
+      "sourceSection": "Section X.Y",
       "sourceQuote": "Exact verbatim text"
     }
   ],
@@ -215,26 +164,25 @@ Extract structured legal document intelligence in JSON matching this schema:
     {
       "id": "dl-1",
       "title": "Title of deadline",
-      "dueDate": "YYYY-MM-DD or relative formula like '60 days before expiry'",
+      "dueDate": "YYYY-MM-DD or relative formula",
       "isRelative": false,
       "relativeTrigger": "Trigger event if relative",
       "actionRequired": "Specific action required",
       "consequenceIfMissed": "Consequence if deadline is missed",
       "urgency": "urgent|upcoming|distant",
       "sourceSection": "Section X.Y",
-      "sourceQuote": "Exact verbatim quote",
-      "completed": false
+      "sourceQuote": "Exact verbatim quote"
     }
   ],
   "financialCommitments": [
     {
       "id": "fin-1",
       "type": "payment|deposit|fee|penalty|escalation",
-      "amount": "e.g. $3,200.00 or 5% of monthly rent",
-      "schedule": "e.g. Monthly on the 1st",
-      "description": "Description of the financial obligation",
+      "amount": "$0.00",
+      "schedule": "Schedule",
+      "description": "Description",
       "sourceSection": "Section X.Y",
-      "sourceQuote": "Exact verbatim quote"
+      "sourceQuote": "Exact quote"
     }
   ],
   "attentionItems": [
@@ -242,99 +190,185 @@ Extract structured legal document intelligence in JSON matching this schema:
       "id": "att-1",
       "category": "unusual_term|unilateral_right|harsh_penalty|hidden_commitment|ambiguity|renewal_trap",
       "priority": "high|medium|low",
-      "headline": "Clear, informative headline (e.g. '24-Month Automatic Renewal Lock-In')",
-      "whyAttention": "Objective, neutral explanation of why this item may deserve the user's attention (e.g. 'This clause contains an automatic extension...')",
+      "headline": "Clear headline",
+      "whyAttention": "Objective, neutral explanation",
       "verbatimQuote": "Verbatim quote",
       "sourceSection": "Section X.Y",
       "pageNumber": 1,
-      "suggestedQuestions": [
-        "Constructive question to ask the counterparty or discuss with a qualified legal professional"
-      ],
-      "status": "unreviewed"
+      "suggestedQuestions": ["Question to ask"]
     }
   ],
-  "inconsistencies": [
-    {
-      "id": "inc-1",
-      "title": "Title of inconsistency or tension between clauses",
-      "description": "Description of why these provisions might conflict or cause ambiguity",
-      "conflictingSections": [
-        {"section": "Section A", "quote": "Quote A"},
-        {"section": "Section B", "quote": "Quote B"}
-      ],
-      "notesForDiscussion": "Notes to discuss with a qualified legal professional"
-    }
-  ]
+  "inconsistencies": []
 }
+Return ONLY valid JSON. Ensure all quotes are 100% faithful to the text.`;
 
-Ensure all extracted quotes are 100% faithful to the source text. Do not invent provisions. Return ONLY valid JSON.`;
+        try {
+          const { text } = await generateContentWithResilience(
+            ai,
+            extractionPrompt,
+            {
+              systemInstruction: LEGAL_SYSTEM_GUARDRAIL,
+              responseMimeType: 'application/json',
+              temperature: 0.1,
+            },
+            'gemini-3.8-flash'
+          );
 
-    let text = '{}';
-    try {
-      const { text: generatedText } = await generateContentWithResilience(
-        ai,
-        extractionPrompt,
-        {
-          systemInstruction: LEGAL_SYSTEM_GUARDRAIL,
-          responseMimeType: 'application/json',
-          temperature: 0.1,
-        },
-        'gemini-3.8-flash'
-      );
-      text = generatedText;
-    } catch (modelErr) {
-      console.warn('Gemini extraction models unavailable; using structured fallback engine:', modelErr);
-      const fallbackData = extractFallbackAnalysis(rawText, title, category);
-      return res.json(fallbackData);
-    }
+          let parsedJson;
+          try {
+            parsedJson = JSON.parse(text);
+          } catch {
+            const match = text.match(/\{[\s\S]*\}/);
+            if (match) parsedJson = JSON.parse(match[0]);
+          }
 
-    let data;
-    try {
-      data = JSON.parse(text);
-    } catch {
-      const match = text.match(/\{[\s\S]*\}/);
-      if (match) {
-        data = JSON.parse(match[0]);
-      } else {
-        const fallbackData = extractFallbackAnalysis(rawText, title, category);
-        return res.json(fallbackData);
+          // Phase 15: Strict schema validation
+          const validation = validateAiAnalysisOutput(parsedJson);
+          if (validation.valid && validation.data) {
+            analysisData = validation.data;
+          } else {
+            console.warn('[Validation] AI output failed strict schema validation:', validation.error);
+          }
+        } catch (genErr) {
+          console.error('[Document Processing] Gemini generation error:', (genErr as Error)?.message);
+        }
       }
-    }
 
-    res.json(data);
-  } catch (err: unknown) {
-    const message = err instanceof Error ? err.message : 'Unknown analysis error';
-    console.error('Error analyzing document:', message);
-    res.status(500).json({ error: message });
-  }
-});
+      // Phase 15: If AI fails or returns invalid schema, mark processing_failed without fake fallback legal facts!
+      const status = analysisData ? 'ready' : 'processing_failed';
 
-// Document-Grounded RAG Chat Endpoint (Protected with Firebase Auth)
-app.post('/api/documents/rag-chat', requireAuth, async (req: Request, res: Response) => {
-  try {
-    const { query, documentTitle, documentCategory, documentText, history } = req.body;
+      const finalDocument = {
+        id: documentId,
+        userId: uid,
+        title: docTitle,
+        category: docCategory,
+        fileName: fileName || `${docTitle.toLowerCase().replace(/\s+/g, '_')}.txt`,
+        fileSize: typeof fileSize === 'number' ? fileSize : documentRawText.length,
+        storagePath: `users/${uid}/documents/${documentId}/original`,
+        uploadDate: new Date().toISOString(),
+        lastAnalyzed: new Date().toISOString(),
+        rawText: documentRawText,
+        status: status as 'ready' | 'processing' | 'processing_failed',
+        metadata: analysisData?.metadata || {
+          parties: [],
+          summary: 'Document uploaded. Automated clause extraction could not be completed.',
+        },
+        extractedSections: analysisData?.extractedSections || [],
+        obligations: analysisData?.obligations || [],
+        deadlines: analysisData?.deadlines || [],
+        financialCommitments: analysisData?.financialCommitments || [],
+        attentionItems: analysisData?.attentionItems || [],
+        inconsistencies: analysisData?.inconsistencies || [],
+      };
 
-    if (!query || typeof query !== 'string') {
-      return res.status(400).json({ error: 'Query string is required.' });
-    }
+      // Phase 2: Save to Firestore under users/{uid}/documents/{documentId} and subcollections
+      await saveDocumentAndSubcollections(uid, finalDocument);
 
-    const ai = getAiClient();
-    if (!ai) {
-      return res.json({
-        answer: "I am ready to assist you in understanding this document. To enable AI-grounded retrieval and deep comprehension, please configure your `GEMINI_API_KEY` in the AI Studio Secrets panel. You can also view all extracted clauses, deadlines, and attention items in the Document Intelligence panels.",
-        citations: [],
-        disclaimer: "LegalLens is an information and document-understanding assistant, not a lawyer or legal advisor. Please discuss any legal questions with a qualified professional.",
+      // Phase 7: Index semantic chunks in managed user-isolated Semantic RAG layer
+      await indexDocument(ai, uid, documentId, docTitle, documentRawText);
+
+      res.json({
+        success: true,
+        documentId,
+        status: finalDocument.status,
+        document: finalDocument,
       });
+    } catch (err: unknown) {
+      // Phase 14: Safe public error message
+      console.error('[Document Processing Exception]:', err instanceof Error ? err.message : 'Unknown error');
+      res.status(500).json({ error: 'Internal server error while processing document.' });
     }
+  }
+);
 
-    // Retrieve relevant chunks for grounded context
-    const chunks = retrieveRelevantChunks(query, documentText || '', 6);
-    const contextBlock = chunks.map((c, i) => `[EXCERPT ${i + 1}]:\n${c}`).join('\n\n');
+// Backward compatibility endpoint for /api/documents/analyze (delegates to process)
+app.post(
+  '/api/documents/analyze',
+  requireAuth,
+  documentProcessLimiter,
+  async (req: Request, res: Response) => {
+    try {
+      const uid = req.user!.uid;
+      const { title, category, rawText } = req.body;
+      const documentId = `doc-${Date.now()}`;
 
-    const chatPrompt = `
-The user is asking a question about their legal document: "${documentTitle || 'Personal Legal Document'}" (${documentCategory || 'Agreement'}).
+      if (!rawText || typeof rawText !== 'string' || rawText.trim().length < 20) {
+        return res.status(400).json({ error: 'Please provide valid document text to analyze.' });
+      }
 
-DOCUMENT EXCERPTS RETRIEVED VIA GROUNDED RAG:
+      await savePrivateFile(uid, documentId, rawText, 'text/plain');
+
+      // Forward to process logic
+      req.body.documentId = documentId;
+      req.body.fileContent = rawText;
+      return (app._router.handle as any)(req, res, () => {});
+    } catch (err: unknown) {
+      res.status(500).json({ error: 'Internal server error while analyzing document.' });
+    }
+  }
+);
+
+/**
+ * Phase 8: MINIMIZED DOCUMENT-GROUNDED RAG CHAT ENDPOINT
+ * Request pattern: { documentId, query, sessionId }
+ * Browser NEVER sends raw documentText!
+ * 1. Verify user (requireAuth)
+ * 2. Verify document ownership (server-side check)
+ * 3. Semantic RAG retrieval (retrieveSemanticChunks)
+ * 4. Gemini completion with citations
+ */
+app.post(
+  '/api/documents/rag-chat',
+  requireAuth,
+  chatLimiter,
+  validateChatRequest,
+  async (req: Request, res: Response) => {
+    try {
+      const uid = req.user!.uid;
+      const { documentId, query, sessionId } = req.body;
+
+      // Phase 2: Server-side authorization check (user must own this document)
+      const isOwner = await verifyDocumentOwnership(uid, documentId);
+      if (!isOwner) {
+        // Strict boundary: User A cannot query User B's document
+        return res.status(403).json({ error: 'Forbidden: You do not have permission to access this document.' });
+      }
+
+      const doc = await getDocumentById(uid, documentId);
+      const docTitle = doc?.title || 'Legal Document';
+      const docCategory = doc?.category || 'Agreement';
+
+      const ai = getAiClient();
+      if (!ai) {
+        return res.json({
+          answer: "I am ready to assist you in understanding this document. To enable AI-grounded retrieval and deep comprehension, please configure your GEMINI_API_KEY in the AI Studio Secrets panel. You can also view all extracted clauses, deadlines, and attention items in the Document Intelligence panels.",
+          citations: [],
+          disclaimer: "LegalLens is an information and document-understanding assistant, not a lawyer or legal advisor. Please discuss any legal questions with a qualified professional.",
+        });
+      }
+
+      // Phase 7: Retrieve relevant chunks using isolated semantic vector retrieval
+      const searchResults = await retrieveSemanticChunks(ai, uid, documentId, query, 5);
+      const excerpts = searchResults.map(r => r.chunk.text);
+
+      if (excerpts.length === 0) {
+        // Fallback: If document was not yet indexed in semantic store, try indexing on-demand
+        const rawContent = await getPrivateFile(uid, documentId);
+        if (rawContent) {
+          await indexDocument(ai, uid, documentId, docTitle, rawContent);
+          const retried = await retrieveSemanticChunks(ai, uid, documentId, query, 5);
+          excerpts.push(...retried.map(r => r.chunk.text));
+        }
+      }
+
+      const contextBlock = excerpts
+        .map((c, i) => `[EXCERPT ${i + 1}]:\n${c}`)
+        .join('\n\n');
+
+      const chatPrompt = `
+The user is asking a question about their legal document: "${docTitle}" (${docCategory}).
+
+DOCUMENT EXCERPTS RETRIEVED VIA GROUNDED SEMANTIC RAG:
 """
 ${contextBlock}
 """
@@ -369,46 +403,81 @@ Format your response in JSON:
 }
 `;
 
-    let text = '{}';
-    try {
-      const { text: generatedText } = await generateContentWithResilience(
-        ai,
-        chatPrompt,
-        {
-          systemInstruction: LEGAL_SYSTEM_GUARDRAIL,
-          responseMimeType: 'application/json',
-          temperature: 0.2,
-        },
-        'gemini-3.8-flash'
-      );
-      text = generatedText;
-    } catch (modelErr) {
-      console.warn('Gemini chat models unavailable; generating grounded excerpt fallback from document:', modelErr);
-      const groundedFallback = generateGroundedExcerptFallback(
-        query,
-        documentTitle || 'Legal Document',
-        chunks
-      );
-      return res.json(groundedFallback);
-    }
-
-    let result;
-    try {
-      result = JSON.parse(text);
-    } catch {
-      const match = text.match(/\{[\s\S]*\}/);
-      if (match) {
-        result = JSON.parse(match[0]);
-      } else {
-        result = generateGroundedExcerptFallback(query, documentTitle || 'Legal Document', chunks);
+      let text = '{}';
+      try {
+        const { text: generatedText } = await generateContentWithResilience(
+          ai,
+          chatPrompt,
+          {
+            systemInstruction: LEGAL_SYSTEM_GUARDRAIL,
+            responseMimeType: 'application/json',
+            temperature: 0.2,
+          },
+          'gemini-3.8-flash'
+        );
+        text = generatedText;
+      } catch (modelErr) {
+        console.warn('Gemini chat unavailable; generating grounded excerpt fallback:', (modelErr as Error)?.message);
+        const groundedFallback = generateGroundedExcerptFallback(query, docTitle, excerpts);
+        return res.json(groundedFallback);
       }
+
+      let result;
+      try {
+        result = JSON.parse(text);
+      } catch {
+        const match = text.match(/\{[\s\S]*\}/);
+        if (match) {
+          result = JSON.parse(match[0]);
+        } else {
+          result = generateGroundedExcerptFallback(query, docTitle, excerpts);
+        }
+      }
+
+      res.json(result);
+    } catch (err: unknown) {
+      // Phase 14: Safe public error message
+      console.error('[Chat Exception]:', err instanceof Error ? err.message : 'Unknown error');
+      res.status(500).json({ error: 'Internal server error while processing chat query.' });
+    }
+  }
+);
+
+/**
+ * Phase 9: COMPLETE CASCADING DELETION ENDPOINT
+ * Deletes:
+ * 1. Firebase Storage file
+ * 2. Firestore document
+ * 3. Extracted sections subcollection
+ * 4. Obligations subcollection
+ * 5. Deadlines subcollection
+ * 6. Attention items subcollection
+ * 7. Gemini Semantic RAG index chunks
+ */
+app.delete('/api/documents/:documentId', requireAuth, async (req: Request, res: Response) => {
+  try {
+    const uid = req.user!.uid;
+    const { documentId } = req.params;
+
+    if (!documentId || !/^[a-zA-Z0-9_\-]+$/.test(documentId)) {
+      return res.status(400).json({ error: 'Invalid documentId format.' });
     }
 
-    res.json(result);
+    // Verify ownership before deleting
+    const isOwner = await verifyDocumentOwnership(uid, documentId);
+    if (!isOwner) {
+      return res.status(403).json({ error: 'Forbidden: You do not own this document.' });
+    }
+
+    await deleteDocumentCascade(uid, documentId);
+
+    res.json({
+      success: true,
+      message: `Document ${documentId} and all associated provisions, storage files, and index entries permanently deleted.`,
+    });
   } catch (err: unknown) {
-    const message = err instanceof Error ? err.message : 'Unknown chat error';
-    console.error('Error in RAG chat:', message);
-    res.status(500).json({ error: message });
+    console.error('[Deletion Exception]:', err instanceof Error ? err.message : 'Unknown error');
+    res.status(500).json({ error: 'Internal server error while deleting document.' });
   }
 });
 

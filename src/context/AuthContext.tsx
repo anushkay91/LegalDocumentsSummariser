@@ -5,8 +5,7 @@ import {
   loginWithGoogle, 
   loginAnonymously, 
   logoutUser, 
-  getCurrentIdToken,
-  getOrCreateGuestSessionToken
+  getCurrentIdToken 
 } from '../lib/firebase';
 
 export interface AppUser {
@@ -46,15 +45,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
           setIdToken(null);
         }
       } else {
-        // If not logged in with Firebase, provide an active guest session
-        const guestToken = getOrCreateGuestSessionToken();
-        setIdToken(guestToken);
-        setUser({
-          uid: `guest_${guestToken.slice(-10)}`,
-          email: null,
-          displayName: 'Guest User',
-          isAnonymous: true,
-        });
+        setUser(null);
+        setIdToken(null);
       }
       setLoading(false);
     });
@@ -82,16 +74,6 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         const token = await res.user.getIdToken();
         setUser(res.user);
         setIdToken(token);
-      } else {
-        // Fallback when anonymous auth is restricted by project console
-        const guestToken = getOrCreateGuestSessionToken();
-        setIdToken(guestToken);
-        setUser({
-          uid: `guest_${guestToken.slice(-10)}`,
-          email: null,
-          displayName: 'Guest User',
-          isAnonymous: true,
-        });
       }
     } finally {
       setLoading(false);
@@ -102,14 +84,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     setLoading(true);
     try {
       await logoutUser();
-      const guestToken = getOrCreateGuestSessionToken();
-      setIdToken(guestToken);
-      setUser({
-        uid: `guest_${guestToken.slice(-10)}`,
-        email: null,
-        displayName: 'Guest User',
-        isAnonymous: true,
-      });
+      setUser(null);
+      setIdToken(null);
     } finally {
       setLoading(false);
     }

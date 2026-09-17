@@ -5,7 +5,9 @@ import {
   deleteDoc, 
   getDocs, 
   query, 
-  orderBy 
+  orderBy,
+  onSnapshot,
+  Unsubscribe 
 } from 'firebase/firestore';
 import { db, auth } from './firebase';
 import { LegalDocument } from '../types';
@@ -22,7 +24,6 @@ export function sanitizeFirestoreId(id: string): string {
  */
 export async function saveDocumentToFirestore(userId: string, document: LegalDocument): Promise<void> {
   if (!auth.currentUser || auth.currentUser.uid !== userId) {
-    // If user is guest or not signed into Firebase Auth, local storage is used
     return;
   }
 
@@ -30,7 +31,6 @@ export async function saveDocumentToFirestore(userId: string, document: LegalDoc
     const docId = sanitizeFirestoreId(document.id);
     const docRef = doc(db, 'users', userId, 'documents', docId);
     
-    // Convert complex document object for clean Firestore storage
     await setDoc(docRef, {
       ...document,
       id: docId,
@@ -38,7 +38,7 @@ export async function saveDocumentToFirestore(userId: string, document: LegalDoc
       updatedAt: new Date().toISOString(),
     }, { merge: true });
   } catch (error) {
-    console.warn('Could not sync document to Firestore (continuing with local state):', error);
+    console.warn('Could not sync document to Firestore:', error);
   }
 }
 
@@ -57,6 +57,36 @@ export async function deleteDocumentFromFirestore(userId: string, documentId: st
     console.warn('Could not delete document from Firestore:', error);
   }
   return false;
+}
+
+/**
+ * Real-time listener for user documents from Firestore (Phase 5: Real-time Firestore listeners)
+ */
+export function subscribeToUserDocuments(
+  userId: string,
+  onDocuments: (docs: LegalDocument[]) => void,
+  onError?: (err: Error) => void
+): Unsubscribe {
+  const collRef = collection(db, 'users', userId, 'documents');
+  const q = query(collRef, orderBy('uploadDate', 'desc'));
+
+  return onSnapshot(
+    q,
+    (snapshot) => {
+      const docs: LegalDocument[] = [];
+      snapshot.forEach((snap) => {
+        const data = snap.data();
+        if (data && data.title) {
+          docs.push(data as LegalDocument);
+        }
+      });
+      onDocuments(docs);
+    },
+    (err) => {
+      console.warn('Firestore subscription notice:', err.message);
+      if (onError) onError(err);
+    }
+  );
 }
 
 /**
@@ -79,7 +109,7 @@ export async function loadUserDocumentsFromFirestore(userId: string): Promise<Le
     const docs: LegalDocument[] = [];
     snapshot.forEach((snap) => {
       const data = snap.data();
-      if (data && data.title && data.rawText) {
+      if (data && data.title) {
         docs.push(data as LegalDocument);
       }
     });

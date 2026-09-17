@@ -12,6 +12,7 @@ import {
 import { DocumentCategory, LegalDocument } from '../types';
 import { SAMPLE_DOCUMENTS } from '../data/sampleDocuments';
 import { authenticatedFetch } from '../lib/apiClient';
+import { auth, uploadPrivateDocumentFile } from '../lib/firebase';
 
 interface DocumentUploadModalProps {
   isOpen: boolean;
@@ -87,44 +88,62 @@ export const DocumentUploadModal: React.FC<DocumentUploadModalProps> = ({
 
     const docId = `doc-${Date.now()}`;
     const docTitle = title.trim() || 'Untitled Legal Document';
+    const fileName = selectedFile?.name || `${docTitle.toLowerCase().replace(/\s+/g, '_')}.txt`;
+    const fileSize = selectedFile?.size || textToAnalyze.length;
+    const mimeType = selectedFile?.type || 'text/plain';
 
     try {
-      const response = await authenticatedFetch('/api/documents/analyze', {
+      // Phase 4: Direct upload to private Firebase Storage if user is signed in
+      if (auth.currentUser) {
+        try {
+          const blobToUpload = selectedFile || new Blob([textToAnalyze], { type: mimeType });
+          await uploadPrivateDocumentFile(auth.currentUser.uid, docId, blobToUpload);
+        } catch (storageErr) {
+          console.warn('Storage upload note (proceeding with secure API processing):', storageErr);
+        }
+      }
+
+      // Phase 6: Direct-to-storage processing API call
+      const response = await authenticatedFetch('/api/documents/process', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
+          documentId: docId,
           title: docTitle,
           category,
-          rawText: textToAnalyze,
+          fileName,
+          fileSize,
+          mimeType,
+          fileContent: textToAnalyze,
         }),
       });
 
       if (!response.ok) {
-        throw new Error(`Server returned ${response.status}`);
+        const errJson = await response.json().catch(() => ({}));
+        throw new Error(errJson.error || `Server returned ${response.status}`);
       }
 
-      const analyzed = await response.json();
-
-      const newDocument: LegalDocument = {
+      const result = await response.json();
+      const newDocument: LegalDocument = result.document || {
         id: docId,
         title: docTitle,
         category,
-        fileName: selectedFile?.name || `${docTitle.toLowerCase().replace(/\s+/g, '_')}.txt`,
-        fileSize: selectedFile?.size || textToAnalyze.length,
+        fileName,
+        fileSize,
         uploadDate: new Date().toISOString(),
         lastAnalyzed: new Date().toISOString(),
         rawText: textToAnalyze,
-        metadata: analyzed.metadata || {
-          parties: [{ name: 'Party A', role: 'Signatory' }],
-          summary: 'Document uploaded and analyzed by LegalLens.',
+        metadata: {
+          parties: [],
+          summary: 'Uploaded legal agreement.',
         },
-        extractedSections: analyzed.extractedSections || [],
-        obligations: analyzed.obligations || [],
-        deadlines: analyzed.deadlines || [],
-        financialCommitments: analyzed.financialCommitments || [],
-        attentionItems: analyzed.attentionItems || [],
-        inconsistencies: analyzed.inconsistencies || [],
-        status: 'ready',
+        extractedSections: [],
+        obligations: [],
+        deadlines: [],
+        financialCommitments: [],
+        attentionItems: [],
+        inconsistencies: [],
+        status: result.status || 'ready',
       };
 
       onDocumentAdded(newDocument);
